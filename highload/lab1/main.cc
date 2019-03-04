@@ -5,6 +5,7 @@ using namespace std;
 
 #define TAG_X 0
 #define TAG_PART 1
+#define EPS 1e-11
 
 double nth(double x, int n) {
   double res = n & 1 == 1 ? -1 : 1;
@@ -24,13 +25,9 @@ void master_thread(int rank, int np) {
     inv = true;
     x = 1 / x;
   }
-  double e;
-  cout << "Write e:" << endl;
-  cin >> e;
 
   for (int i = 1; i < np; i++) {
-    double dat[2] = { x, e };
-    MPI_Send(dat, 2, MPI_DOUBLE, i, TAG_X, MPI_COMM_WORLD);
+    MPI_Send(&x, 1, MPI_DOUBLE, i, TAG_X, MPI_COMM_WORLD);
   }
 
   double res = 1;
@@ -42,7 +39,7 @@ void master_thread(int rank, int np) {
 //      cout << "r 1 " << j << endl;
       MPI_Recv(&part, 1, MPI_DOUBLE, j, TAG_PART, MPI_COMM_WORLD,
           MPI_STATUS_IGNORE);
-      if (part < e) has_zero = true;
+      if (part < EPS) has_zero = true;
       res += part;
     }
     res += nth(x, i * np + 1);
@@ -55,14 +52,13 @@ void master_thread(int rank, int np) {
 }
 
 void worker_thread(int rank, int np) {
-  double dat[2];
-  MPI_Recv(dat, 2, MPI_DOUBLE, 0, TAG_X, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+  double x;
+  MPI_Recv(&x, 1, MPI_DOUBLE, 0, TAG_X, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
-  double x = dat[0], e = dat[1];
   int i = 0;
   double part = nth(x, np * i + rank + 1);
 //  cout << "part " << np * i + rank + 1 << " of " << x << " is " << part << endl;
-  while (part >= e) {
+  while (part >= EPS) {
 //    cout << "s " << rank << endl;
     MPI_Send(&part, 1, MPI_DOUBLE, 0, TAG_PART, MPI_COMM_WORLD);
     i++;
