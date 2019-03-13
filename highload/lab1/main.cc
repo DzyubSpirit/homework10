@@ -1,77 +1,96 @@
-#include <mpi.h>
+#include <ctime>
+#include <iomanip>
 #include <iostream>
+#include <limits.h>
+#include <math.h>
+#include <mpi.h>
 
 using namespace std;
 
 #define TAG_X 0
 #define TAG_PART 1
 #define EPS 1e-11
+#define CALC_ITER_COUNT 1e2
 
-double nth(double x, int n) {
-  double res = n & 1 == 1 ? -1 : 1;
-  for (int i = 1; i <= n; i++) {
-    res *= (x-1) * (n + i) / i / 4;
-  }
-  res /= (1 - 2 * n);
-  return res;
+double next_element(double prev, double x, int n) {
+  return -prev * (x - 1) * (2 * n + 1) * (2 * n + 2) * (1 - 2 * n) /
+         (1 - 2 * (n + 1)) / (n + 1) / (n + 1) / 4;
 }
 
-void master_thread(int rank, int np) {
+double nth(double x, double prev_elem, int prev_n, int n) {
+  for (int i = prev_n; i < n; i++) {
+    prev_elem = next_element(prev_elem, x, i);
+  }
+  return prev_elem;
+}
+
+array<double, 2> part_sum(double x, int rank, int np) {
+  int i = 0;
+  double elem = nth(x, 1, 0, rank + 1);
+  double part = 0;
+  // cout << rank << " " << part << endl;
+  while (abs(elem) >= EPS) {
+    part += elem;
+    // cout << rank << " " << part << endl;
+    elem = nth(x, elem, np * i + rank + 1, np * (i + 1) + rank + 1);
+    i++;
+  }
+  return {part, double(i)};
+}
+
+void master_thread(int rank, int np, int calc_iter_count) {
   double x;
   cout << "Write x:" << endl;
   cin >> x;
   bool inv = false;
-  if (x >= 2) {
+  if (x > 1) {
     inv = true;
     x = 1 / x;
   }
 
-  for (int i = 1; i < np; i++) {
-    MPI_Send(&x, 1, MPI_DOUBLE, i, TAG_X, MPI_COMM_WORLD);
-  }
-
-  double res = 1;
-  bool has_zero = false;
-  int i = 0;
-  while (!has_zero) {
-    for (int j = 1; j < np; j++) {
-      double part;
-//      cout << "r 1 " << j << endl;
-      MPI_Recv(&part, 1, MPI_DOUBLE, j, TAG_PART, MPI_COMM_WORLD,
-          MPI_STATUS_IGNORE);
-      if (part < EPS) has_zero = true;
-      res += part;
+  clock_t start_time = clock();
+  for (int calc_i = 0; calc_i < calc_iter_count; calc_i++) {
+    for (int i = 1; i < np; i++) {
+      MPI_Send(&x, 1, MPI_DOUBLE, i, TAG_X, MPI_COMM_WORLD);
     }
-    res += nth(x, i * np + 1);
-//    cout << i << " " << np << endl;
-//    cout << "part " << np * i + 1 << " is " << nth(x, i * np + 1) << endl;
-    i++;
+
+    array<double, 2> part_res = part_sum(x, 0, np);
+    double res = 1 + part_res[0];
+    int iter_count = 1 + int(part_res[1]);
+    for (int i = 1; i < np; i++) {
+      double part_calc[2];
+      MPI_Recv(&part_calc, 2, MPI_DOUBLE, i, TAG_PART, MPI_COMM_WORLD,
+               MPI_STATUS_IGNORE);
+      iter_count += int(part_calc[1]);
+      double recv_part = part_calc[0];
+      res += recv_part;
+    }
+    if (inv)
+      res = 1 / res;
+    if (calc_i == 0) {
+      cout << setprecision(1 - log10(EPS)) << res << endl;
+      cout << "Elements count: " << iter_count << endl;
+    }
   }
-  if (inv) res = 1 / res;
-  cout << res << endl;
+  clock_t end_time = clock();
+  double passed_time = double(end_time - start_time) / CLOCKS_PER_SEC;
+  cout << "Spent " << passed_time << "s"
+       << " on " << calc_iter_count << " iterations." << endl;
+  cout << "Average time: " << passed_time / calc_iter_count * 1e6 << "μs"
+       << endl;
 }
 
-void worker_thread(int rank, int np) {
-  double x;
-  MPI_Recv(&x, 1, MPI_DOUBLE, 0, TAG_X, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+void worker_thread(int rank, int np, int calc_iter_count) {
+  for (int calc_i = 0; calc_i < calc_iter_count; calc_i++) {
+    double x;
+    MPI_Recv(&x, 1, MPI_DOUBLE, 0, TAG_X, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
-  int i = 0;
-  double part = nth(x, np * i + rank + 1);
-//  cout << "part " << np * i + rank + 1 << " of " << x << " is " << part << endl;
-  while (part >= EPS) {
-//    cout << "s " << rank << endl;
-    MPI_Send(&part, 1, MPI_DOUBLE, 0, TAG_PART, MPI_COMM_WORLD);
-    i++;
-    part = nth(x, np * i + rank);
-//    cout << "part " << np * i + rank << " is " << part << endl;
+    array<double, 2> part_calc = part_sum(x, rank, np);
+    MPI_Send(part_calc.data(), 2, MPI_DOUBLE, 0, TAG_PART, MPI_COMM_WORLD);
   }
-  part = 0;
-  MPI_Send(&part, 1, MPI_DOUBLE, 0, TAG_PART, MPI_COMM_WORLD);
-//  cout << "s " << rank << endl;
-//  cout << rank << " done" << endl;
 }
 
-int main(int argc, char** argv) {
+int main(int argc, char **argv) {
   MPI_Init(&argc, &argv);
 
   int rank;
@@ -79,11 +98,10 @@ int main(int argc, char** argv) {
   int np;
   MPI_Comm_size(MPI_COMM_WORLD, &np);
 
-  int x;
   if (rank == 0) {
-    master_thread(rank, np);
+    master_thread(rank, np, CALC_ITER_COUNT);
   } else {
-    worker_thread(rank, np);
+    worker_thread(rank, np, CALC_ITER_COUNT);
   }
 
   MPI_Finalize();
