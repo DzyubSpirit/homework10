@@ -26,11 +26,12 @@ dependencies:
 - stm
 - stm-chans
 - fgl
-- ige >= 0.2.1.1
+- ige >= 0.2.1.2
 - microlens-platform 
 - conduit
 - stm-conduit
 - mtl
+- bytestring
 
 library:
   source-dirs: src
