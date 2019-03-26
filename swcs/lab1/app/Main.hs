@@ -85,14 +85,17 @@ keyProcessing = forever $ awaitOrFinish () $ \kv -> case matchingTab kv of
     ce <- lift $ ask >>= liftIO . atomically . curTab
     transPipe (LabVar . withReaderT (const ce) . unIGEM) $ defaultKeyBinding kv
 
-refresh :: WidgetClass self => self -> ConduitT RefreshType Void LabVar ()
-refresh widget = awaitOrFinish () $ const $ do
+refreshC :: WidgetClass self => self -> ConduitT RefreshType Void LabVar ()
+refreshC widget = forever $ awaitOrFinish () $ const $ do
   le <- ask
+  liftIO $ refresh widget le
+
+refresh :: WidgetClass self => self -> LabEditor -> IO ()
+refresh widget le = do
   liftIO $ atomically $ do
     ce <- curTab le
     modifyTVar ce $ \ce -> ce { esNodeMap = layoutGr (esGraph ce) }
   liftIO $ widgetQueueDraw widget
-  refresh widget
 
 defaultES :: EditorState Weight Weight
 defaultES = EditorState
@@ -112,8 +115,8 @@ openDialog dialog = do
   widgetHide dialog
   return response
 
-openGraphUsingDialog :: Window -> LabEditor -> IO ()
-openGraphUsingDialog parentWindow le = do
+openGraphUsingDialog :: Window -> TVar (EditorState Weight Weight) -> IO ()
+openGraphUsingDialog parentWindow es = do
   dialog <- fileChooserDialogNew
     (Just "Open graph... " :: Maybe Text)
     (Just parentWindow)
@@ -123,10 +126,10 @@ openGraphUsingDialog parentWindow le = do
   when (response == ResponseAccept) $ do
     Just fname <- fileChooserGetFilename dialog
     Just gr    <- graphFromBS <$> B.readFile fname
-    atomically $ curTab le >>= (`modifyTVar` \ce -> ce { esGraph = gr })
+    atomically $ modifyTVar es $ \ce -> ce { esGraph = gr }
 
-saveGraphUsingDialog :: Window -> LabEditor -> IO ()
-saveGraphUsingDialog parentWindow le = do
+saveGraphUsingDialog :: Window -> TVar (EditorState Weight Weight) -> IO ()
+saveGraphUsingDialog parentWindow es = do
   dialog <- fileChooserDialogNew
     (Just "Save graph as... " :: Maybe Text)
     (Just parentWindow)
@@ -135,7 +138,7 @@ saveGraphUsingDialog parentWindow le = do
   response <- openDialog dialog
   when (response == ResponseAccept) $ do
     Just fname <- fileChooserGetFilename dialog
-    es         <- atomically $ curTab le >>= readTVar
+    es         <- atomically $ readTVar es
     B.writeFile fname $ graphToBS $ esGraph es
 
 runMainWindow :: IO ()
@@ -161,17 +164,46 @@ runMainWindow = do
     $  runConduit
     $  sourceTMChan keyPress
     .| keyProcessing
-    .| refresh w
+    .| refreshC w
 
   (w `on` keyPressEvent) $ do
     kv <- eventKeyVal
     liftIO $ atomically $ writeTMChan keyPress kv
-    return True
+    return False
 
   da `on` draw $ liftIO $ renderLabEditor da le
 
-  saveAs <- builderGetObject b castToImageMenuItem ("save" :: Text)
-  saveAs `on` menuItemActivated $ saveGraphUsingDialog w le
+  taskSaveAs <- builderGetObject b castToImageMenuItem ("task_save" :: Text)
+  taskSaveAs `on` menuItemActivated $ saveGraphUsingDialog w $ taskEditor le
+
+  taskOpenAs <- builderGetObject b castToImageMenuItem ("task_open" :: Text)
+  taskOpenAs `on` menuItemActivated $ do
+    openGraphUsingDialog w $ taskEditor le
+    atomically $ writeTVar (editorTab le) TaskEditorTab
+    refresh w le
+
+  sysSaveAs <- builderGetObject b castToImageMenuItem ("sys_save" :: Text)
+  sysSaveAs `on` menuItemActivated $ saveGraphUsingDialog w $ sysEditor le
+
+  sysOpenAs <- builderGetObject b castToImageMenuItem ("sys_open" :: Text)
+  sysOpenAs `on` menuItemActivated $ do
+    openGraphUsingDialog w $ sysEditor le
+    atomically $ writeTVar (editorTab le) SysEditorTab
+    refresh w le
+
+  taskNewEditor <- builderGetObject b castToMenuItem ("task_new_editor" :: Text)
+  taskNewEditor `on` menuItemActivated $ do
+    atomically $ do
+      writeTVar (taskEditor le) defaultES
+      writeTVar (editorTab le)  TaskEditorTab
+    refresh w le
+
+  sysNew <- builderGetObject b castToMenuItem ("sys_new" :: Text)
+  sysNew `on` menuItemActivated $ do
+    atomically $ do
+      writeTVar (sysEditor le) defaultES
+      writeTVar (editorTab le) SysEditorTab
+    refresh w le
 
   widgetShowAll w
   mainGUI
