@@ -32,6 +32,8 @@ dependencies:
 - stm-conduit
 - mtl
 - bytestring
+- cairo
+- containers
 
 library:
   source-dirs: src
