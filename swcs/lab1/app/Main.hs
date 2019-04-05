@@ -239,6 +239,14 @@ runMainWindow = do
       writeTVar (editorTab le) SysEditorTabC
     refresh w le
 
+  help <- builderGetObject b castToMenuItem ("help" :: Text)
+  help `on` menuItemActivated $ do
+    hw <- builderGetObject b castToWindow ("help_window" :: Text)
+    widgetShowAll hw
+
+  quit <- builderGetObject b castToMenuItem ("quit" :: Text)
+  quit `on` menuItemActivated $ mainQuit
+
   widgetShowAll w
   mainGUI
 

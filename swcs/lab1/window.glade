@@ -2,6 +2,35 @@
 <!-- Generated with glade 3.22.1 -->
 <interface>
   <requires lib="gtk+" version="3.20"/>
+  <object class="GtkWindow" id="help_window">
+    <property name="can_focus">False</property>
+    <child>
+      <placeholder/>
+    </child>
+    <child>
+      <object class="GtkLabel">
+        <property name="visible">True</property>
+        <property name="can_focus">False</property>
+        <property name="label" translatable="yes">Editor action:
+a Add node
+c Link node
+d Delete node
+w Write to file
+o Read from file
+q Exit
+
+Editor movement:
++ Zoom in
+- Zoom out
+h Move left
+j Move down
+k Move up
+l Move right
+&gt; Rotate clockwise
+&lt; Rotate counterclockwise</property>
+      </object>
+    </child>
+  </object>
   <object class="GtkApplicationWindow" id="window">
     <property name="can_focus">False</property>
     <child>
@@ -124,6 +153,7 @@
                 <property name="visible">True</property>
                 <property name="can_focus">False</property>
                 <property name="label" translatable="yes">_Modeling</property>
+                <property name="use_underline">True</property>
                 <child type="submenu">
                   <object class="GtkMenu">
                     <property name="visible">True</property>
@@ -133,6 +163,7 @@
                         <property name="visible">True</property>
                         <property name="can_focus">False</property>
                         <property name="label" translatable="yes">_CPUs</property>
+                        <property name="use_underline">True</property>
                       </object>
                     </child>
                     <child>
@@ -140,6 +171,7 @@
                         <property name="visible">True</property>
                         <property name="can_focus">False</property>
                         <property name="label" translatable="yes">_Gant diagram</property>
+                        <property name="use_underline">True</property>
                       </object>
                     </child>
                     <child>
@@ -147,6 +179,7 @@
                         <property name="visible">True</property>
                         <property name="can_focus">False</property>
                         <property name="label" translatable="yes">_Stats</property>
+                        <property name="use_underline">True</property>
                       </object>
                     </child>
                   </object>
@@ -167,7 +200,7 @@
                       <object class="GtkMenuItem">
                         <property name="visible">True</property>
                         <property name="can_focus">False</property>
-                        <property name="label" translatable="yes">Params</property>
+                        <property name="label" translatable="yes">_Params</property>
                         <property name="use_underline">True</property>
                       </object>
                     </child>
@@ -184,7 +217,7 @@
               </object>
             </child>
             <child>
-              <object class="GtkMenuItem">
+              <object class="GtkMenuItem" id="help">
                 <property name="visible">True</property>
                 <property name="can_focus">False</property>
                 <property name="label" translatable="yes">_Help</property>
@@ -192,7 +225,7 @@
               </object>
             </child>
             <child>
-              <object class="GtkMenuItem">
+              <object class="GtkMenuItem" id="quit">
                 <property name="visible">True</property>
                 <property name="can_focus">False</property>
                 <property name="label" translatable="yes">_Quit</property>
