@@ -34,6 +34,7 @@ dependencies:
 - bytestring
 - cairo
 - containers
+- hspec
 
 library:
   source-dirs: src

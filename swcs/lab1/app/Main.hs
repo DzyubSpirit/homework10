@@ -9,6 +9,7 @@ import Graphics.UI.Gtk hiding (Weight)
 import Graphics.UI.Gtk.Builder
 import Graphics.UI.Gtk.Selectors.FileChooser
 import Graphics.UI.Gtk.Selectors.FileChooserDialog
+import Graphics.Rendering.Cairo
 import Data.Graph.Inductive.PatriciaTree
 import Data.Graph.Inductive.Graph
 import Control.Concurrent.STM
@@ -26,6 +27,7 @@ import IGE.Keys
 import IGE.Serialization
 
 import Gant
+import Algo
 
 sampleGr :: Gr Weight Weight
 sampleGr = mkGraph nodes edges
@@ -43,9 +45,15 @@ initRM = RM (100 :+ 0) (100 :+ 100)
 
 data ChosenEditorTab = TaskEditorTabC | SysEditorTabC | GantTabC
 
+data EnchEditorState = EnchEditorState
+  { esE :: TVar (EditorState Weight Weight)
+  , isAcyclicE :: TVar Bool
+  , isConnectedE :: TVar Bool
+  }
+
 data LabEditor = LabEditor
-  { taskEditor :: TVar (EditorState Weight Weight)
-  , sysEditor :: TVar (EditorState Weight Weight)
+  { taskEditor :: EnchEditorState
+  , sysEditor :: EnchEditorState
   , gantDiagram :: Maybe GantDiagram
   , editorTab :: TVar ChosenEditorTab
   }
@@ -58,18 +66,33 @@ makeLensesFor [
   , ("gantDiagram", "_gantDiagram")
   , ("editorTab", "_editorTab")] ''LabEditor
 
-data Tab = EditorTab (EditorState Weight Weight) | GantTab GantDiagram
+data EnchEditorTab = EnchEditorTab
+  { esT :: EditorState Weight Weight
+  , isAcyclicT :: Bool
+  , isConnectedT :: Bool
+  }
+
+data Tab = EditorTab EnchEditorTab | GantTab GantDiagram
 
 instance DimsRenderable Tab where
-  dimsRender dims (EditorTab t) = dimsRender dims t
+  dimsRender dims@(w,h) (EditorTab et) = do
+    dimsRender dims (esT et)
+    let aText  = "Acyclic:" <> if isAcyclicT et then "Yes" else "No":: Text
+        cText  = "Connected:" <> if isConnectedT et then "Yes" else "No" :: Text
+    aExts <- textExtents aText
+    cExts <- textExtents cText
+    moveTo (fromIntegral w - 5 - textExtentsWidth aExts) 30
+    showText aText
+    moveTo (fromIntegral w - 5 - textExtentsWidth cExts) (30 + textExtentsHeight aExts)
+    showText cText
   dimsRender dims (GantTab gd) = dimsRender dims gd
 
 renderLabEditor :: WidgetClass self => self -> LabEditor -> IO ()
 renderLabEditor da le = do
   Just dw <- widgetGetWindow da
   dims    <- liftM2 (,) (drawWindowGetWidth dw) (drawWindowGetHeight dw)
-  es      <- atomically $ curTab le
-  renderWithDrawWindow dw $ dimsRender dims es
+  tab     <- atomically $ curTab le
+  renderWithDrawWindow dw $ dimsRender dims tab
 
 matchingTab :: KeyVal -> Maybe ChosenEditorTab
 matchingTab kv | kv == xK_1 = Just TaskEditorTabC
@@ -85,21 +108,23 @@ curTab :: LabEditor -> STM Tab
 curTab le = do
   et <- readTVar $ editorTab le
   case et of
-    TaskEditorTabC -> fmap EditorTab $ readTVar $ taskEditor le
-    SysEditorTabC  -> fmap EditorTab $ readTVar $ sysEditor le
+    TaskEditorTabC -> eToTab $ taskEditor le
+    SysEditorTabC  -> eToTab $ sysEditor le
     GantTabC       -> maybe gd (return . GantTab) $ gantDiagram le
-     where
-      gd = do
-        tg <- fmap esGraph $ readTVar $ taskEditor le
-        eg <- fmap esGraph $ readTVar $ sysEditor le
-        return $ GantTab $ gdFromGraphs tg eg
+ where
+  eToTab (EnchEditorState a b c) =
+    EditorTab <$> liftA3 EnchEditorTab (readTVar a) (readTVar b) (readTVar c)
+  gd = do
+    tg <- fmap esGraph $ readTVar $ esE $ taskEditor le
+    eg <- fmap esGraph $ readTVar $ esE $ sysEditor le
+    return $ GantTab $ gdFromGraphs tg eg
 
 curEditorTab :: LabEditor -> STM (Maybe (TVar (EditorState Weight Weight)))
 curEditorTab le = do
   et <- readTVar $ editorTab le
   return $ case et of
-    TaskEditorTabC -> Just $ taskEditor le
-    SysEditorTabC  -> Just $ sysEditor le
+    TaskEditorTabC -> Just $ esE $ taskEditor le
+    SysEditorTabC  -> Just $ esE $ sysEditor le
     GantTabC       -> Nothing
 
 keyProcessing :: ConduitT KeyVal RefreshType LabVar ()
@@ -119,6 +144,18 @@ keyProcessing = forever $ awaitOrFinish () $ \kv -> case matchingTab kv of
 refreshC :: WidgetClass self => self -> ConduitT RefreshType Void LabVar ()
 refreshC widget = forever $ awaitOrFinish () $ const $ do
   le <- ask
+  liftIO $ atomically $ do
+    et <- readTVar $ editorTab le
+    let esM = case et of
+          TaskEditorTabC -> Just $ taskEditor le
+          SysEditorTabC  -> Just $ sysEditor le
+          _              -> Nothing
+    case esM of
+      Nothing                           -> return ()
+      Just (EnchEditorState es isA isC) -> do
+        gr <- esGraph <$> readTVar es
+        writeTVar isA $ isAcyclic gr
+        writeTVar isC $ isConnected gr
   liftIO $ refresh widget le
 
 refresh :: WidgetClass self => self -> LabEditor -> IO ()
@@ -131,16 +168,28 @@ refresh widget le = do
       Nothing -> return ()
   liftIO $ widgetQueueDraw widget
 
-defaultES :: EditorState Weight Weight
-defaultES = EditorState
-  { esGraph   = initGr
-  , esRM      = initRM
-  , esNum     = noNodes initGr
-  , esCmd     = ""
-  , esPrompt  = ""
-  , esLabels  = []
-  , esNodeMap = layoutGr initGr
-  }
+defaultES :: EnchEditorTab
+defaultES = EnchEditorTab es (isAcyclic initGr) (isConnected initGr)
+ where
+  es = EditorState
+    { esGraph   = initGr
+    , esRM      = initRM
+    , esNum     = noNodes initGr
+    , esCmd     = ""
+    , esPrompt  = ""
+    , esLabels  = []
+    , esNodeMap = layoutGr initGr
+    }
+
+newEditorTab :: EnchEditorTab -> STM EnchEditorState
+newEditorTab (EnchEditorTab a b c) =
+  liftA3 EnchEditorState (newTVar a) (newTVar b) (newTVar c)
+
+writeEditorTab :: EnchEditorState -> EnchEditorTab -> STM ()
+writeEditorTab es (EnchEditorTab a b c) = do
+  writeTVar (esE es)          a
+  writeTVar (isAcyclicE es)   b
+  writeTVar (isConnectedE es) c
 
 openDialog :: DialogClass self => self -> IO ResponseId
 openDialog dialog = do
@@ -183,10 +232,10 @@ runMainWindow = do
   w  <- builderGetObject b castToWindow ("window" :: Text)
   da <- builderGetObject b castToDrawingArea ("view" :: Text)
 
-  on w deleteEvent $ liftIO mainQuit >> return True
+  w `on` deleteEvent $ liftIO mainQuit >> return True
 
-  task <- newTVarIO defaultES
-  sys  <- newTVarIO defaultES
+  task <- atomically $ newEditorTab defaultES
+  sys  <- atomically $ newEditorTab defaultES
   tab  <- newTVarIO TaskEditorTabC
   let le = LabEditor task sys Nothing tab
 
@@ -208,41 +257,56 @@ runMainWindow = do
   da `on` draw $ liftIO $ renderLabEditor da le
 
   taskSaveAs <- builderGetObject b castToImageMenuItem ("task_save" :: Text)
-  taskSaveAs `on` menuItemActivated $ saveGraphUsingDialog w $ taskEditor le
+  taskSaveAs `on` menuItemActivated $ saveGraphUsingDialog w $ esE $ taskEditor
+    le
 
   taskOpenAs <- builderGetObject b castToImageMenuItem ("task_open" :: Text)
   taskOpenAs `on` menuItemActivated $ do
-    openGraphUsingDialog w $ taskEditor le
+    openGraphUsingDialog w $ esE $ taskEditor le
     atomically $ writeTVar (editorTab le) TaskEditorTabC
     refresh w le
 
   sysSaveAs <- builderGetObject b castToImageMenuItem ("sys_save" :: Text)
-  sysSaveAs `on` menuItemActivated $ saveGraphUsingDialog w $ sysEditor le
+  sysSaveAs `on` menuItemActivated $ saveGraphUsingDialog w $ esE $ sysEditor le
 
   sysOpenAs <- builderGetObject b castToImageMenuItem ("sys_open" :: Text)
   sysOpenAs `on` menuItemActivated $ do
-    openGraphUsingDialog w $ sysEditor le
+    openGraphUsingDialog w $ esE $ sysEditor le
     atomically $ writeTVar (editorTab le) SysEditorTabC
     refresh w le
 
   taskNewEditor <- builderGetObject b castToMenuItem ("task_new_editor" :: Text)
   taskNewEditor `on` menuItemActivated $ do
     atomically $ do
-      writeTVar (taskEditor le) defaultES
-      writeTVar (editorTab le)  TaskEditorTabC
+      writeEditorTab (taskEditor le) defaultES
+      writeTVar      (editorTab le)  TaskEditorTabC
     refresh w le
 
   sysNew <- builderGetObject b castToMenuItem ("sys_new" :: Text)
   sysNew `on` menuItemActivated $ do
     atomically $ do
-      writeTVar (sysEditor le) defaultES
-      writeTVar (editorTab le) SysEditorTabC
+      writeEditorTab (sysEditor le) defaultES
+      writeTVar      (editorTab le) SysEditorTabC
     refresh w le
 
+  hw <- builderGetObject b castToWindow ("help_window" :: Text)
+  hw `on` deleteEvent $ liftIO (widgetHide hw) >> return True
+
   help <- builderGetObject b castToMenuItem ("help" :: Text)
-  help `on` menuItemActivated $ do
-    hw <- builderGetObject b castToWindow ("help_window" :: Text)
-    widgetShowAll hw
+  help `on` menuItemActivated $ widgetShowAll hw
+
+  gen_win  <- builderGetObject b castToWindow ("generate_window" :: Text)
+
+  gen_task <- builderGetObject b castToMenuItem ("generate_task" :: Text)
+  gen_task `on` menuItemActivated $ widgetShowAll gen_win
+
+  gen_btn <- builderGetObject b castToButton ("generate_btn" :: Text)
+  gen_btn `on` buttonActivated $ do
+    atomically $ do
+      let gr = undefined
+      modifyTVar (esE $ taskEditor le) $ \te -> te { esGraph = gr }
+      writeTVar (editorTab le) TaskEditorTabC
+    widgetHide gen_win
 
   quit <- builderGetObject b castToMenuItem ("quit" :: Text)
   quit `on` menuItemActivated $ mainQuit
