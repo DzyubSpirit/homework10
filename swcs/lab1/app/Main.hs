@@ -47,8 +47,13 @@ data ChosenEditorTab = TaskEditorTabC | SysEditorTabC | GantTabC
 
 data EnchEditorState = EnchEditorState
   { esE :: TVar (EditorState Weight Weight)
-  , isAcyclicE :: TVar Bool
-  , isConnectedE :: TVar Bool
+  , compInfoE :: TVar CompInfo
+  }
+
+data CompInfo = CompInfo
+  {  _isAcyclic :: Bool
+  ,  _isConnected :: Bool
+  ,  _taskQueue :: Maybe [Node]
   }
 
 data LabEditor = LabEditor
@@ -68,8 +73,7 @@ makeLensesFor [
 
 data EnchEditorTab = EnchEditorTab
   { esT :: EditorState Weight Weight
-  , isAcyclicT :: Bool
-  , isConnectedT :: Bool
+  , compInfoT :: CompInfo
   }
 
 data Tab = EditorTab EnchEditorTab | GantTab GantDiagram
@@ -77,14 +81,23 @@ data Tab = EditorTab EnchEditorTab | GantTab GantDiagram
 instance DimsRenderable Tab where
   dimsRender dims@(w,h) (EditorTab et) = do
     dimsRender dims (esT et)
-    let aText  = "Acyclic:" <> if isAcyclicT et then "Yes" else "No":: Text
-        cText  = "Connected:" <> if isConnectedT et then "Yes" else "No" :: Text
+    let aText  = "Acyclic:" <> if _isAcyclic (compInfoT et) then "Yes" else "No":: Text
+        cText  = "Connected:" <> if _isConnected (compInfoT et) then "Yes" else "No" :: Text
     aExts <- textExtents aText
     cExts <- textExtents cText
-    moveTo (fromIntegral w - 5 - textExtentsWidth aExts) 30
+    let h0 = 30
+        h1 = h0 + textExtentsHeight aExts
+    moveTo (fromIntegral w - 5 - textExtentsWidth aExts) h0
     showText aText
-    moveTo (fromIntegral w - 5 - textExtentsWidth cExts) (30 + textExtentsHeight aExts)
+    moveTo (fromIntegral w - 5 - textExtentsWidth cExts) h1
     showText cText
+    case _taskQueue (compInfoT et) of
+      Just tq -> do
+        let tqText = "Task queue: " <> show tq :: Text
+        tqExts <- textExtents tqText
+        moveTo 5 (fromIntegral h - 15 - textExtentsHeight tqExts)
+        showText tqText
+      Nothing -> return ()
   dimsRender dims (GantTab gd) = dimsRender dims gd
 
 renderLabEditor :: WidgetClass self => self -> LabEditor -> IO ()
@@ -112,8 +125,8 @@ curTab le = do
     SysEditorTabC  -> eToTab $ sysEditor le
     GantTabC       -> maybe gd (return . GantTab) $ gantDiagram le
  where
-  eToTab (EnchEditorState a b c) =
-    EditorTab <$> liftA3 EnchEditorTab (readTVar a) (readTVar b) (readTVar c)
+  eToTab (EnchEditorState a ci) =
+    EditorTab <$> liftA2 EnchEditorTab (readTVar a) (readTVar ci)
   gd = do
     tg <- fmap esGraph $ readTVar $ esE $ taskEditor le
     eg <- fmap esGraph $ readTVar $ esE $ sysEditor le
@@ -151,11 +164,10 @@ refreshC widget = forever $ awaitOrFinish () $ const $ do
           SysEditorTabC  -> Just $ sysEditor le
           _              -> Nothing
     case esM of
-      Nothing                           -> return ()
-      Just (EnchEditorState es isA isC) -> do
+      Nothing                      -> return ()
+      Just (EnchEditorState es ci) -> do
         gr <- esGraph <$> readTVar es
-        writeTVar isA $ isAcyclic gr
-        writeTVar isC $ isConnected gr
+        writeTVar ci $ evalCompInfo gr
   liftIO $ refresh widget le
 
 refresh :: WidgetClass self => self -> LabEditor -> IO ()
@@ -168,8 +180,12 @@ refresh widget le = do
       Nothing -> return ()
   liftIO $ widgetQueueDraw widget
 
+evalCompInfo :: Graph gr => gr Weight Weight -> CompInfo
+evalCompInfo gr = CompInfo (isAcyclic gr) (isConnected gr)
+  $ if isAcyclic gr then Just (taskQueue gr) else Nothing
+
 defaultES :: EnchEditorTab
-defaultES = EnchEditorTab es (isAcyclic initGr) (isConnected initGr)
+defaultES = EnchEditorTab es $ evalCompInfo initGr
  where
   es = EditorState
     { esGraph   = initGr
@@ -182,14 +198,13 @@ defaultES = EnchEditorTab es (isAcyclic initGr) (isConnected initGr)
     }
 
 newEditorTab :: EnchEditorTab -> STM EnchEditorState
-newEditorTab (EnchEditorTab a b c) =
-  liftA3 EnchEditorState (newTVar a) (newTVar b) (newTVar c)
+newEditorTab (EnchEditorTab es ci) =
+  liftA2 EnchEditorState (newTVar es) (newTVar ci)
 
 writeEditorTab :: EnchEditorState -> EnchEditorTab -> STM ()
-writeEditorTab es (EnchEditorTab a b c) = do
-  writeTVar (esE es)          a
-  writeTVar (isAcyclicE es)   b
-  writeTVar (isConnectedE es) c
+writeEditorTab es (EnchEditorTab a ci) = do
+  writeTVar (esE es)       a
+  writeTVar (compInfoE es) ci
 
 openDialog :: DialogClass self => self -> IO ResponseId
 openDialog dialog = do

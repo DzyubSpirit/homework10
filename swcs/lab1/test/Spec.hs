@@ -2,10 +2,13 @@ import Protolude
 import Test.Hspec
 import Data.Graph.Inductive.Graph
 import Data.Graph.Inductive.PatriciaTree
+import qualified Data.Map.Strict as M
 
 import IGE.Types
 
 import Algo
+
+import Examples
 
 mkGraph' :: [LNode Weight] -> [LEdge Weight] -> Gr Weight Weight
 mkGraph' = mkGraph
@@ -69,3 +72,26 @@ main = hspec $ do
                               [(1, 2, 0), (2, 3, 0), (3, 1, 0)]
                    )
       `shouldBe` False
+  describe "criticalPaths" $ do
+    it "empty graph" $ criticalPaths (mkGraph' [] []) `shouldBe` M.fromList []
+    it "one-node graph"
+      $          criticalPaths (mkGraph' [(1, 4)] [])
+      `shouldBe` M.fromList [(1, (4, 1))]
+    it "two-node graph"
+      $          criticalPaths (mkGraph' [(1, 4), (2, 5)] [(1, 2, 10)])
+      `shouldBe` M.fromList [(1, (9, 2)), (2, (5, 1))]
+    it "two-level tree graph"
+      $          criticalPaths
+                   (mkGraph' [(1, 4), (2, 5), (3, 6)] [(1, 2, 10), (1, 3, 11)])
+      `shouldBe` M.fromList [(1, (10, 2)), (2, (5, 1)), (3, (6, 1))]
+    it "test graph" $ criticalPaths testGr `shouldBe` testGrCriticalPaths
+  describe "taskQueue" $ do
+    it "empty graph" $ taskQueue (mkGraph' [] []) `shouldBe` []
+    it "one-node graph" $ taskQueue (mkGraph' [(1, 4)] []) `shouldBe` [1]
+    it "two-node graph"
+      $          taskQueue (mkGraph' [(1, 4), (2, 5)] [(1, 2, 3)])
+      `shouldBe` [1, 2]
+    it "three-node graph"
+      $ taskQueue (mkGraph' [(1, 4), (2, 5), (3, 6)] [(1, 2, 3), (1, 3, 5)])
+      `shouldBe` [1, 3, 2]
+    it "test graph" $ taskQueue testGr `shouldBe` testGrTaskQueue
