@@ -6,7 +6,8 @@ import Data.Graph.Inductive.PatriciaTree
 import IGE.Types
 
 import Protolude
-import Data.List (groupBy)
+import System.Random
+import Data.List (groupBy, (!!))
 import Data.Maybe (fromJust)
 import qualified Data.Map.Strict as M
 
@@ -16,9 +17,6 @@ data GraphSettings = GraphSettings
   , edgesNum :: Int
   , edgeWeightRange :: (Weight,Weight)
   }
-
---randomGraph :: GraphSettings -> IO (Graph Weight Weight)
---randomGraph = undefined
 
 isAcyclic :: Graph gr => gr Weight Weight -> Bool
 isAcyclic gr = all (uncurry isEdgeAcyclic) $ zip edges $ scanr insEdge
@@ -56,14 +54,29 @@ isConnected gr =
   em = edgesMap $ labEdges gr
   nc = length $ labNodes gr
 
+randomQueue :: (RandomGen g, Graph gr) => g -> gr Weight Weight -> [Node]
+randomQueue g gr =
+  reverse $ snd $ fromJust $ head $ drop (noNodes gr) $ iterate
+    iterFunc
+    ((M.empty, g), [])
+ where
+  iem = edgesMap $ (\(a, b, c) -> (b, a, c)) <$> labEdges gr
+  canBeNext used n = M.notMember n used
+    && all (`M.member` used) (fromMaybe [] $ M.lookup n iem)
+  iterFunc ((used, g), q) =
+    let ns      = filter (canBeNext used) $ fst <$> labNodes gr
+        (i, g') = randomR (0, length ns - 1) g
+        n       = ns !! i
+    in  ((M.insert n () used, g'), n : q)
+
 taskQueue :: Graph gr => gr Weight Weight -> [Node]
 taskQueue gr = map fst $ sortBy sDfASort $ M.toList $ M.map
-  (\(t, c) -> fromIntegral t / gt + fromIntegral c / gt)
+  (\(t, c) -> fromIntegral t / maxT + fromIntegral c / maxC)
   cps
  where
-  cps = criticalPaths gr
-  gt  = fromIntegral $ M.foldr (+) 0 $ M.map fst cps
-  gc  = fromIntegral $ M.foldr (+) 0 $ M.map snd cps
+  cps  = criticalPaths gr
+  maxT = fromIntegral $ M.foldr max 0 $ M.map fst cps
+  maxC = fromIntegral $ M.foldr max 0 $ M.map snd cps
   -- second descendant, first ascending
   sDfASort (fa, sa) (fb, sb) =
     let se = compare sb sa in if se /= EQ then se else compare fa fb

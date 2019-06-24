@@ -2,13 +2,19 @@ import Protolude
 import Test.Hspec
 import Data.Graph.Inductive.Graph
 import Data.Graph.Inductive.PatriciaTree
+import System.Random
 import qualified Data.Map.Strict as M
 
 import IGE.Types
 
 import Algo
+import Gant
+import Model
+import Types
 
 import Examples
+import GeneratorTests
+import ModelTests hiding (mkGraph)
 
 mkGraph' :: [LNode Weight] -> [LEdge Weight] -> Gr Weight Weight
 mkGraph' = mkGraph
@@ -95,3 +101,51 @@ main = hspec $ do
       $ taskQueue (mkGraph' [(1, 4), (2, 5), (3, 6)] [(1, 2, 3), (1, 3, 5)])
       `shouldBe` [1, 3, 2]
     it "test graph" $ taskQueue testGr `shouldBe` testGrTaskQueue
+  describe "randomQueue" $ do
+    let [g1, g2, g3, g4] = map
+          mkStdGen
+          [ -8488355513137236356
+          , 5869735224982706236
+          , -7982683311953146195
+          , -8152950985931255716
+          ]
+    it "empty graph" $ randomQueue g1 (mkGraph' [] []) `shouldBe` []
+    it "one-node graph" $ randomQueue g2 (mkGraph' [(1, 2)] []) `shouldBe` [1]
+    it "two-node graph"
+      $          randomQueue g3 (mkGraph' [(1, 3), (2, 4)] [(1, 2, 5)])
+      `shouldBe` [1, 2]
+    it "test graph"
+      $          length (randomQueue g4 testGr)
+      `shouldBe` length testGrTaskQueue
+  votes $ mkStdGen 5595375131091215088
+  describe "makeIntervals" $ do
+    it "empty timeline gives empty intervals"
+      $          makeIntervals ([], [])
+      `shouldBe` [Interval 0 maxBound []]
+    it "one-element timeline gives one interval"
+      $          makeIntervals ([TimeRecord 0 2 1], [])
+      `shouldBe` [Interval 0 2 [Left 1], Interval 2 maxBound []]
+
+    it "two separate elements timeline gives three intervals"
+      $          makeIntervals ([TimeRecord 0 2 1, TimeRecord 3 4 2], [])
+      `shouldBe` [ Interval 0 2        [Left 1]
+                 , Interval 2 3        []
+                 , Interval 3 4        [Left 2]
+                 , Interval 4 maxBound []
+                 ]
+
+    it "two elements with the same border give three intervals"
+      $ makeIntervals ([TimeRecord 0 2 1], [TimeRecord 0 1 (Transfer 1 2 1)])
+      `shouldBe` [ Interval 0 1        [Right (Transfer 1 2 1), Left 1]
+                 , Interval 1 2        [Left 1]
+                 , Interval 2 maxBound []
+                 ]
+    it "two elements (big and small) give three intervals"
+
+      $ makeIntervals ([TimeRecord 0 3 1], [TimeRecord 1 2 (Transfer 1 2 1)])
+      `shouldBe` [ Interval 0 1        [Left 1]
+                 , Interval 1 2        [Right (Transfer 1 2 1), Left 1]
+                 , Interval 2 3        [Left 1]
+                 , Interval 3 maxBound []
+                 ]
+  modelTests

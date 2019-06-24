@@ -1,6 +1,7 @@
 module Main where
 
-import Protolude hiding (on)
+import GHC.Read (Read(..))
+import Protolude hiding (on, Read)
 import Conduit
 import Control.Monad.Reader (withReaderT)
 import Data.Conduit.Lift
@@ -19,6 +20,11 @@ import Lens.Micro.Platform
 import Data.Conduit.TMChan
 import Control.Concurrent.STM.TMChan
 import qualified Data.Map.Strict as M
+import System.Random (RandomGen, newStdGen)
+import Data.Maybe (fromJust)
+import Data.List (groupBy)
+import Data.IORef
+import qualified Data.Graph.Inductive as G
 
 import IGE.Control
 import IGE.Layout
@@ -26,17 +32,21 @@ import IGE.Render
 import IGE.Keys
 import IGE.Serialization
 
+import Types
 import Gant
 import Algo
+import Model
+import Generator hiding (isAcyclic)
 
 sampleGr :: Gr Weight Weight
-sampleGr = mkGraph nodes edges
- where
-  nodes :: [(Node, Weight)]
-  nodes = second Weight <$> [(0, 10), (1, 20), (2, 30)]
-  edges :: [(Node, Node, Weight)]
-  edges = fmap (\(a, b, c) -> (a, b, Weight c))
-               [(0, 1, 1), (1, 0, 4), (1, 2, 2), (0, 2, 3)]
+sampleGr = mkGraph [] []
+--sampleGr = mkGraph nodes edges
+-- where
+--  nodes :: [(Node, Weight)]
+--  nodes = second Weight <$> [(0, 10), (1, 20), (2, 30)]
+--  edges :: [(Node, Node, Weight)]
+--  edges = fmap (\(a, b, c) -> (a, b, Weight c))
+--               [(0, 1, 1), (1, 0, 4), (1, 2, 2), (0, 2, 3)]
 
 initGr = sampleGr
 
@@ -44,6 +54,7 @@ initRM :: RM
 initRM = RM (100 :+ 0) (100 :+ 100)
 
 data ChosenEditorTab = TaskEditorTabC | SysEditorTabC | GantTabC
+  deriving (Eq)
 
 data EnchEditorState = EnchEditorState
   { esE :: TVar (EditorState Weight Weight)
@@ -53,13 +64,19 @@ data EnchEditorState = EnchEditorState
 data CompInfo = CompInfo
   {  _isAcyclic :: Bool
   ,  _isConnected :: Bool
-  ,  _taskQueue :: Maybe [Node]
+  }
+
+data ModelInfo = ModelInfo
+  { _taskQueue :: Maybe [Node]
+  , _randomQueue :: Maybe [Node]
+  , _gantDiagram :: Maybe GantDiagram
   }
 
 data LabEditor = LabEditor
   { taskEditor :: EnchEditorState
   , sysEditor :: EnchEditorState
-  , gantDiagram :: Maybe GantDiagram
+  , modelInfo :: TVar ModelInfo
+  , cpuParams :: TVar CPUParams
   , editorTab :: TVar ChosenEditorTab
   }
 newtype LabVar a = LabVar { unLabVar :: ReaderT LabEditor IO a }
@@ -76,10 +93,15 @@ data EnchEditorTab = EnchEditorTab
   , compInfoT :: CompInfo
   }
 
+data EditorView = EditorView
+  { _tabV :: Tab
+  , _modelInfoV :: ModelInfo
+  }
+
 data Tab = EditorTab EnchEditorTab | GantTab GantDiagram
 
-instance DimsRenderable Tab where
-  dimsRender dims@(w,h) (EditorTab et) = do
+instance DimsRenderable EditorView where
+  dimsRender dims@(w,h) (EditorView (EditorTab et) mi) = do
     dimsRender dims (esT et)
     let aText  = "Acyclic:" <> if _isAcyclic (compInfoT et) then "Yes" else "No":: Text
         cText  = "Connected:" <> if _isConnected (compInfoT et) then "Yes" else "No" :: Text
@@ -91,14 +113,19 @@ instance DimsRenderable Tab where
     showText aText
     moveTo (fromIntegral w - 5 - textExtentsWidth cExts) h1
     showText cText
-    case _taskQueue (compInfoT et) of
+    case _taskQueue mi of
       Just tq -> do
-        let tqText = "Task queue: " <> show tq :: Text
+        let rq = fromJust $ _randomQueue mi
+            tqText = "Task queue: " <> show tq :: Text
+            rqText = "Random queue: " <> show rq :: Text
         tqExts <- textExtents tqText
-        moveTo 5 (fromIntegral h - 15 - textExtentsHeight tqExts)
+        rqExts <- textExtents rqText
+        moveTo 5 (fromIntegral h - 15 - textExtentsHeight tqExts - textExtentsHeight rqExts)
         showText tqText
+        moveTo 5 (fromIntegral h - 15  - textExtentsHeight rqExts)
+        showText rqText
       Nothing -> return ()
-  dimsRender dims (GantTab gd) = dimsRender dims gd
+  dimsRender dims (EditorView (GantTab gd) mi) = dimsRender dims gd
 
 renderLabEditor :: WidgetClass self => self -> LabEditor -> IO ()
 renderLabEditor da le = do
@@ -113,24 +140,35 @@ matchingTab kv | kv == xK_1 = Just TaskEditorTabC
                | kv == xK_3 = Just GantTabC
                | otherwise  = Nothing
 
-gdFromGraphs :: Gr Weight Weight -> Gr Weight Weight -> GantDiagram
-gdFromGraphs tasks sys =
-  GantDiagram $ M.fromList [(1, ([TimeRecord 1 2 4], [TimeRecord 0 1 (1, 3)]))]
+gdFromGraphs :: GantDiagram
+gdFromGraphs = GantDiagram
+  $ M.fromList [(1, ([TimeRecord 1 2 4], [TimeRecord 0 1 (Transfer 1 3 4)]))]
 
-curTab :: LabEditor -> STM Tab
+curTab :: LabEditor -> STM EditorView
 curTab le = do
+  mi <- readTVar $ modelInfo le
+  let eToTab (EnchEditorState aT ciT) = do
+        a  <- readTVar aT
+        ci <- readTVar ciT
+        return $ EditorView (EditorTab $ EnchEditorTab a ci) mi
   et <- readTVar $ editorTab le
   case et of
     TaskEditorTabC -> eToTab $ taskEditor le
     SysEditorTabC  -> eToTab $ sysEditor le
-    GantTabC       -> maybe gd (return . GantTab) $ gantDiagram le
- where
-  eToTab (EnchEditorState a ci) =
-    EditorTab <$> liftA2 EnchEditorTab (readTVar a) (readTVar ci)
-  gd = do
-    tg <- fmap esGraph $ readTVar $ esE $ taskEditor le
-    eg <- fmap esGraph $ readTVar $ esE $ sysEditor le
-    return $ GantTab $ gdFromGraphs tg eg
+    GantTabC       -> do
+      gM <- fmap _gantDiagram $ readTVar $ modelInfo le
+      return $ EditorView (GantTab $ fromMaybe gdFromGraphs gM) mi
+
+      {-
+      let
+        gd = do
+          tg   <- fmap esGraph $ readTVar $ esE $ taskEditor le
+          sg   <- fmap esGraph $ readTVar $ esE $ sysEditor le
+          cpup <- readTVar $ Main.cpuParams le
+          return $ closestMatching (ModelParams tg sg cpup) <$> _taskQueue mi
+      gant <- maybe (fromMaybe gdFromGraphs <$> gd) return gM
+      return $ EditorView (GantTab gant) mi
+-}
 
 curEditorTab :: LabEditor -> STM (Maybe (TVar (EditorState Weight Weight)))
 curEditorTab le = do
@@ -146,28 +184,50 @@ keyProcessing = forever $ awaitOrFinish () $ \kv -> case matchingTab kv of
     lift $ do
       et <- editorTab <$> ask
       liftIO $ atomically $ modifyTVar et $ const t
-    yield LayoutChange
+    yield GraphChange
   Nothing -> do
-    ceM <- lift $ ask >>= liftIO . atomically . curEditorTab
+    le  <- ask
+    ceM <- lift $ liftIO $ atomically $ do
+      et <- readTVar $ editorTab le
+      return $ case et of
+        TaskEditorTabC -> Just (esE $ taskEditor le, defaultKeyBinding)
+        SysEditorTabC  -> Just (esE $ sysEditor le, symKeyBinding)
+        GantTabC       -> Nothing
     case ceM of
-      Just ce -> transPipe (LabVar . withReaderT (const ce) . unIGEM)
-        $ defaultKeyBinding kv
+      Just (ce, kb) ->
+        transPipe (LabVar . withReaderT (const ce) . unIGEM) $ kb kv
       Nothing -> return ()
 
+changeGraph :: RandomGen g => g -> LabEditor -> STM ()
+changeGraph g le = do
+  et <- readTVar $ editorTab le
+  let esM = case et of
+        TaskEditorTabC -> Just $ taskEditor le
+        SysEditorTabC  -> Just $ sysEditor le
+        _              -> Nothing
+  case esM of
+    Nothing                      -> return ()
+    Just (EnchEditorState es ci) -> do
+      gr <- esGraph <$> readTVar es
+      writeTVar ci $ evalCompInfo g gr
+  tg <- fmap esGraph $ readTVar $ esE $ taskEditor le
+  let tq' = if isAcyclic tg then Just (taskQueue tg) else Nothing
+  let rq' = if isAcyclic tg then Just (randomQueue g tg) else Nothing
+  sg    <- fmap esGraph $ readTVar $ esE $ sysEditor le
+  gant' <- if isJust tq' && isConnected sg && G.order sg > 0
+    then do
+      mi   <- readTVar $ modelInfo le
+      cpup <- readTVar $ Main.cpuParams le
+      return $ Just $ closestMatching (ModelParams tg sg cpup) (fromJust tq')
+    else return Nothing
+  writeTVar (modelInfo le) (ModelInfo tq' rq' gant')
+
+
 refreshC :: WidgetClass self => self -> ConduitT RefreshType Void LabVar ()
-refreshC widget = forever $ awaitOrFinish () $ const $ do
+refreshC widget = forever $ awaitOrFinish () $ \rt -> do
   le <- ask
-  liftIO $ atomically $ do
-    et <- readTVar $ editorTab le
-    let esM = case et of
-          TaskEditorTabC -> Just $ taskEditor le
-          SysEditorTabC  -> Just $ sysEditor le
-          _              -> Nothing
-    case esM of
-      Nothing                      -> return ()
-      Just (EnchEditorState es ci) -> do
-        gr <- esGraph <$> readTVar es
-        writeTVar ci $ evalCompInfo gr
+  g  <- liftIO newStdGen
+  when (rt == GraphChange) $ liftIO $ atomically $ changeGraph g le
   liftIO $ refresh widget le
 
 refresh :: WidgetClass self => self -> LabEditor -> IO ()
@@ -180,12 +240,13 @@ refresh widget le = do
       Nothing -> return ()
   liftIO $ widgetQueueDraw widget
 
-evalCompInfo :: Graph gr => gr Weight Weight -> CompInfo
-evalCompInfo gr = CompInfo (isAcyclic gr) (isConnected gr)
-  $ if isAcyclic gr then Just (taskQueue gr) else Nothing
+evalCompInfo :: (RandomGen g, Graph gr) => g -> gr Weight Weight -> CompInfo
+evalCompInfo g gr = CompInfo (isAcyclic gr) (isConnected gr)
+--  (if isAcyclic gr then Just (taskQueue gr) else Nothing)
+--  (if isAcyclic gr then Just (randomQueue g gr) else Nothing)
 
-defaultES :: EnchEditorTab
-defaultES = EnchEditorTab es $ evalCompInfo initGr
+defaultES :: RandomGen g => g -> EnchEditorTab
+defaultES g = EnchEditorTab es $ evalCompInfo g initGr
  where
   es = EditorState
     { esGraph   = initGr
@@ -196,6 +257,9 @@ defaultES = EnchEditorTab es $ evalCompInfo initGr
     , esLabels  = []
     , esNodeMap = layoutGr initGr
     }
+
+defaultCPUParams :: CPUParams
+defaultCPUParams = CPUParams 1 True False 0
 
 newEditorTab :: EnchEditorTab -> STM EnchEditorState
 newEditorTab (EnchEditorTab es ci) =
@@ -249,10 +313,13 @@ runMainWindow = do
 
   w `on` deleteEvent $ liftIO mainQuit >> return True
 
-  task <- atomically $ newEditorTab defaultES
-  sys  <- atomically $ newEditorTab defaultES
+  g    <- newStdGen
+  task <- atomically $ newEditorTab $ defaultES g
+  sys  <- atomically $ newEditorTab $ defaultES g
+  mi   <- atomically $ newTVar $ ModelInfo Nothing Nothing Nothing
+  cp   <- atomically $ newTVar defaultCPUParams
   tab  <- newTVarIO TaskEditorTabC
-  let le = LabEditor task sys Nothing tab
+  let le = LabEditor task sys mi cp tab
 
   keyPress <- newTMChanIO
   _        <-
@@ -293,15 +360,15 @@ runMainWindow = do
   taskNewEditor <- builderGetObject b castToMenuItem ("task_new_editor" :: Text)
   taskNewEditor `on` menuItemActivated $ do
     atomically $ do
-      writeEditorTab (taskEditor le) defaultES
-      writeTVar      (editorTab le)  TaskEditorTabC
+      writeEditorTab (taskEditor le) $ defaultES g
+      writeTVar (editorTab le) TaskEditorTabC
     refresh w le
 
-  sysNew <- builderGetObject b castToMenuItem ("sys_new" :: Text)
+  sysNew <- builderGetObject b castToMenuItem ("sys_new_editor" :: Text)
   sysNew `on` menuItemActivated $ do
     atomically $ do
-      writeEditorTab (sysEditor le) defaultES
-      writeTVar      (editorTab le) SysEditorTabC
+      writeEditorTab (sysEditor le) $ defaultES g
+      writeTVar (editorTab le) SysEditorTabC
     refresh w le
 
   hw <- builderGetObject b castToWindow ("help_window" :: Text)
@@ -310,24 +377,113 @@ runMainWindow = do
   help <- builderGetObject b castToMenuItem ("help" :: Text)
   help `on` menuItemActivated $ widgetShowAll hw
 
-  gen_win  <- builderGetObject b castToWindow ("generate_window" :: Text)
-
-  gen_task <- builderGetObject b castToMenuItem ("generate_task" :: Text)
-  gen_task `on` menuItemActivated $ widgetShowAll gen_win
-
-  gen_btn <- builderGetObject b castToButton ("generate_btn" :: Text)
-  gen_btn `on` buttonActivated $ do
-    atomically $ do
-      let gr = undefined
-      modifyTVar (esE $ taskEditor le) $ \te -> te { esGraph = gr }
-      writeTVar (editorTab le) TaskEditorTabC
-    widgetHide gen_win
+  generateWindow  w b le
+  cpuParamsWindow w b le
 
   quit <- builderGetObject b castToMenuItem ("quit" :: Text)
   quit `on` menuItemActivated $ mainQuit
 
   widgetShowAll w
   mainGUI
+
+generateWindow :: Window -> Builder -> LabEditor -> IO ()
+generateWindow w b le = do
+  gen_win <- builderGetObject b castToWindow ("generate_window" :: Text)
+  nodes_number <- builderGetObject b castToEntry ("nodes_number" :: Text)
+  node_weight_range <- builderGetObject b
+                                        castToEntry
+                                        ("node_weight_range" :: Text)
+  connectivity      <- builderGetObject b castToEntry ("connectivity" :: Text)
+  edge_weight_range <- builderGetObject b
+                                        castToEntry
+                                        ("edge_weight_range" :: Text)
+  let readRange str = do
+        let [fStr, sStr] = groupBy (const (/= '-')) str
+        f <- readMaybe fStr
+        s <- readMaybe $ drop 1 sStr
+        return (f, s)
+      genParams = do
+        nn    <- readMaybe <$> entryGetText nodes_number
+        nwr   <- readRange <$> entryGetText node_weight_range
+        cntvt <- readMaybe <$> entryGetText connectivity
+        ewr   <- readRange <$> entryGetText edge_weight_range
+        return $ liftM4 GenParams nn nwr cntvt (Just ewr)
+
+  isTaskGenRef <- newIORef True
+
+  gen_task     <- builderGetObject b castToMenuItem ("generate_task" :: Text)
+  gen_task `on` menuItemActivated $ do
+    writeIORef isTaskGenRef True
+    widgetShowAll gen_win
+
+  gen_sys <- builderGetObject b castToMenuItem ("generate_sys" :: Text)
+  gen_sys `on` menuItemActivated $ do
+    writeIORef isTaskGenRef False
+    widgetShowAll gen_win
+
+  initSeed <- newStdGen
+  print initSeed
+  seedVar <- atomically $ newTVar initSeed
+  gen_btn <- builderGetObject b castToButton ("generate_btn" :: Text)
+  gen_btn `on` buttonActivated $ do
+    gpM    <- genParams
+    isTask <- readIORef isTaskGenRef
+    when (isJust gpM) $ atomically $ do
+      seed <- readTVar seedVar
+      let (grM, seed') = (if isTask then randomTaskGraph else randomSysGraph)
+            seed
+            (fromJust gpM)
+      writeTVar seedVar seed'
+      when (isJust grM) $ do
+        modifyTVar (esE $ (if isTask then taskEditor else sysEditor) le)
+          $ \te -> te { esGraph = fromJust grM }
+        writeTVar (editorTab le)
+                  (if isTask then TaskEditorTabC else SysEditorTabC)
+        changeGraph seed le
+    seed <- atomically $ readTVar seedVar
+    print seed
+    widgetHide gen_win
+    refresh w le
+
+  return ()
+
+cpuParamsWindow :: Window -> Builder -> LabEditor -> IO ()
+cpuParamsWindow w b le = do
+  cpu_params_win <- builderGetObject b
+                                     castToWindow
+                                     ("cpu_params_window" :: Text)
+  ph_links          <- builderGetObject b castToEntry ("ph_links" :: Text)
+  in_out_processors <- builderGetObject b
+                                        castToCheckButton
+                                        ("in_out_processors" :: Text)
+  duplex_links <- builderGetObject b castToCheckButton ("duplex_links" :: Text)
+  packet_length  <- builderGetObject b castToEntry ("packet_length" :: Text)
+  save           <- builderGetObject b castToButton ("cpu_params_save" :: Text)
+
+  cpu_params_btn <- builderGetObject b castToMenuItem ("cpu_params_btn" :: Text)
+  cpu_params_btn `on` menuItemActivated $ widgetShowAll cpu_params_win
+
+  let readCPUParams = do
+        phLinks         <- readMaybe <$> entryGetText ph_links
+        inOutProcessors <- toggleButtonGetActive in_out_processors
+        duplexLinks     <- toggleButtonGetActive duplex_links
+        packetLength    <- (\s -> if s == "" then Just 0 else readMaybe s)
+          <$> entryGetText packet_length
+        return $ do
+          phl <- phLinks
+          pl  <- packetLength
+          return $ CPUParams phl inOutProcessors duplexLinks pl
+
+  save `on` buttonActivated $ do
+    cpM <- readCPUParams
+    case cpM of
+      Nothing -> putText "Wrong format"
+      Just cp -> do
+        atomically $ writeTVar (Main.cpuParams le) cp
+        widgetHide cpu_params_win
+        refresh w le
+
+  return ()
 
 main :: IO ()
 main = runMainWindow

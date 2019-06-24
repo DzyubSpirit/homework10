@@ -1,26 +1,35 @@
 module Gant where
 
 import Protolude
-import Data.Graph.Inductive.Graph
+import qualified Data.Graph.Inductive as G
 import qualified Data.Map.Strict as M
+import Data.Graph.Inductive.Graph
 import Graphics.Rendering.Cairo
+import Data.Maybe (fromJust)
+import Data.Function (on)
 
 import IGE.Types
 import IGE.Render
 
-type Task = Int
-type Transfer = (Int, Int)
+import Types
+
+data Transfer = Transfer
+  { from :: G.Node
+  , to ::G.Node
+  , task :: Task
+  } deriving (Eq, Ord, Show)
+
 type TimeLine = ([TimeRecord Task], [TimeRecord Transfer])
 
 data TimeRecord a = TimeRecord
   { begin :: Int
   , end :: Int
   , label :: a
-  }
+  } deriving (Eq, Show)
 
 newtype GantDiagram = GantDiagram
   {  cpus :: Map Node TimeLine
-  }
+  } deriving (Eq, Show)
 
 padding = 30
 arrowSize = 5
@@ -71,8 +80,13 @@ instance DimsRenderable GantDiagram where
                 ny = dy +(uy-dy)*y/(fromIntegral nodeN+1)
         plotLine :: Double -> Double -> Double -> Text -> Render ()
         plotLine y x1 x2 l = do
+          let bh = 0.02
           uncurry moveTo $ trXY (x1, y)
           uncurry lineTo $ trXY (x2, y)
+          uncurry moveTo $ trXY (x1, y-bh)
+          uncurry lineTo $ trXY (x1, y+bh)
+          uncurry moveTo $ trXY (x2, y-bh)
+          uncurry lineTo $ trXY (x2, y+bh)
           let (mx, my) = trXY (x1+ (x2-x1)/2, y)
           ext <- textExtents l
           moveTo (mx-(textExtentsWidth ext / 2)) (my-textPadding)
@@ -93,7 +107,8 @@ instance DimsRenderable GantDiagram where
                   $ map snd $ M.elems cpus
     for_ tasks $ \(i, TimeRecord b e t) ->
       plotLine i (fromIntegral b) (fromIntegral e) (show t)
-    for_ transfers $ \(i, TimeRecord b e (from, to)) ->
+    for_ transfers $ \(i, TimeRecord b e (Transfer from to task)) ->
       plotLine (i-0.5) (fromIntegral b) (fromIntegral e)
-               (show from<>" - "<> show to)
+               (show from<>"-"<> show to<>"("<>show task<>")")
+
     stroke
